@@ -56,3 +56,7 @@ In such cases, the membership list will likely consist of only internal (i.e. un
 After we filter out unroutable addresses, if the membership list is empty we fall back on the cached membership list (if any).
 This ensures that we continue to display a meaningful connectivity graph for the clustered keyserver, so long as we have correctly spidered it in the past.
 
+## Credits
+
+This spider was adapted from the code that runs <a href="https://sks-status.gwolf.org">sks-status.gwolf.org</a>.
+
