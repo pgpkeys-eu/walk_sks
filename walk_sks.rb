@@ -6,7 +6,7 @@
 #
 # A script to walk the SKS peering mesh and print pretty graphs
 #
-# © Gunnar Wolf 2019-2021, Andrew Gallagher 2021
+# © Gunnar Wolf 2019-2021, Andrew Gallagher 2021-2022
 #######################################################################
 
 require 'open-uri'
@@ -22,6 +22,10 @@ Log = Logger.new(File.join(SksStatusDir, 'running.log'), 'weekly', 4)
 Log.level = Logger::INFO
 
 Ourselves = "spider.pgpkeys.eu"
+
+# Housekeeping
+HistoryExpireDays = 366
+MissingExpireDays = 30
 
 # Always include the following servers in the startfrom list
 StartFrom = [
@@ -58,7 +62,7 @@ HostAliases = {
   "sks.pgpkeys.eu" => ["de.pgpkeys.eu"],
   "hkp.openpgpkeys.net" => ["pgp.gwolf.org"],
   "keyserver1.computer42.org" => ["keyserver.computer42.org"],
-  "zuul.rediris.es" => ["pgp.rediris.es"], # pgp is a round-robin for zuul and gozer, but let's pick one
+  "gozer.rediris.es" => ["pgp.rediris.es"], # pgp is a round-robin for zuul and gozer, but zuul is currently broken
   "pgp.surf.nl" => ["pgp.surfnet.nl"],
   "sks.pyro.eu.org" => ["keyserver.sincer.us"],
   "openpgp.circl.lu" => ["pgp.circl.lu"],
@@ -73,6 +77,10 @@ HostAliases = {
 
 now = Time.now.utc
 ISOTimestamp = now.iso8601
+MissingExpireLimit = (now - MissingExpireDays*86400).iso8601
+HistoryExpireLimit = (now - HistoryExpireDays*86400).iso8601
+Log.info("Time now %s; Missing node expiry %s; History expiry %s" % [ ISOTimestamp, MissingExpireLimit, HistoryExpireLimit ])
+
 # don't use iso8601 in filenames, the colons will break scp
 OutDirTimestamp = '%04d%02d%02d-%02d%02d%02d' % [now.year, now.month, now.day, now.hour, now.min, now.sec]
 OutDir = File.join(SksStatusDir, OutDirTimestamp)
@@ -90,6 +98,8 @@ if File.exist?(StateCache)
 else
   PersistentState = {}
 end
+
+PersistentState['servers'] ||= {}
 
 if PersistentState['INIT']
   # Merge the hardcoded and cached lists of initial servers.
@@ -185,6 +195,7 @@ def graph_connections()
   mutualsDrawn = {}
   # only graph the servers discovered in this run, not the full cache
   Servers.keys.each do |server|
+    mutualsDrawn[server] = []
     (Servers[server] || []).each do |peer|
       # Skip if we already drew our own inverse, or if the link is reflexive
       if ! (mutualsDrawn[peer] && mutualsDrawn[peer].include?(server)) && server != peer
@@ -192,7 +203,6 @@ def graph_connections()
           # Draw a mutual as a heavy, directionless line.
           attributes = "color=black, dir=both, arrowsize=0.5, penwidth=2, weight=3"
           # Remind ourselves to skip the second, inverse link
-          mutualsDrawn[server] ||= []
           mutualsDrawn[server].append(peer)
         else
           # Draw a non-mutual as a light, directioned line
@@ -252,8 +262,9 @@ end
 def nines(history)
   # Get the frequency of "ok" statuses in N-nines format (as an integer)
   statuses = history.values.map { |moment| moment['status'] }
+  return 0 if history.size == 0
   nineDigits = 0.5-Math.log10(1-statuses.count("ok").fdiv(history.size))
-  return -1 if nineDigits.infinite?
+  return 0 if nineDigits.infinite?
   return nineDigits.to_i
 end
 
@@ -428,10 +439,10 @@ def walk_from(server)
   end
   # Reliability in nines is pretty meaningless until we have LOTS of history
   # Put it in the DOT comments for now but otherwise say nothing
-  #PersistentState['servers'][server]['history'] ||= {}
-  #reliability = nines(PersistentState['servers'][server]['history'])
-  #graph ' "%s" [color=%s, fontcolor=%s, label="%s\\n%s", comment="%s %s %sN"];' % [server, color, fontcolor, nameList, description, status, green_filter, reliability]
-  graph ' "%s" [color=%s, fontcolor=%s, label="%s\\n%s", comment="%s %s"];' % [server, color, fontcolor, nameList, description, status, green_filter || ""]
+  PersistentState['servers'][server]['history'] ||= {}
+  reliability = nines(PersistentState['servers'][server]['history'])
+  graph ' "%s" [color=%s, fontcolor=%s, label="%s\\n%s", comment="%s %s %sN"];' % [server, color, fontcolor, nameList, description, status, green_filter, reliability]
+  #graph ' "%s" [color=%s, fontcolor=%s, label="%s\\n%s", comment="%s %s"];' % [server, color, fontcolor, nameList, description, status, green_filter || ""]
 
   peers = filter_peers(peers)
   if peers.size == 0 && PersistentState['servers'][server]['peers'] && PersistentState['servers'][server]['peers'].length != 0
@@ -440,17 +451,22 @@ def walk_from(server)
     peers = filter_peers(PersistentState['servers'][server]['peers'])
   end
 
-  #PersistentState['servers'][server]['history'][ISOTimestamp] = {
-  #  # only keep status for now, but we may expand history in the future
-  #  'status' => status
-  #}
-  # # TODO: expire history and lastSeen when timestamps are older than (?) days
-  # # something like the following:
-  # cutoff = ISOTimestamp - HistoryExpireDays
-  # PersistentState['servers'][server].delete('lastSeen') if lastSeen < cutoff
-  # PersistentState['servers'][server]['history'].keys.each do |timestamp|
-  #   PersistentState['servers'][server]['history'].delete(timestamp) if timestamp < cutoff
-  # end
+  PersistentState['servers'][server]['history'][ISOTimestamp] = {
+    'status' => status
+  }
+  if numkeys
+    PersistentState['servers'][server]['history'][ISOTimestamp]['numkeys'] = numkeys
+  end
+  # Expire nodes and node history
+  if lastSeen && lastSeen < MissingExpireLimit
+    Log.warn("#{server} was last seen at #{lastSeen}, before #{MissingExpireLimit}; demoting")
+    PersistentState['servers'][server].delete('lastSeen')
+  end
+  PersistentState['servers'][server]['history'].keys.each do |timestamp|
+    if timestamp < HistoryExpireLimit
+      PersistentState['servers'][server]['history'].delete(timestamp)
+    end
+  end
 
   PersistentState['servers'][server]['status'] = status
   PersistentState['servers'][server]['peers'] = peers
