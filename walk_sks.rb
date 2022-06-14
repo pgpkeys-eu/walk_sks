@@ -23,9 +23,8 @@ Log.level = Logger::INFO
 
 Ourselves = "spider.pgpkeys.eu"
 
-# Housekeeping
-HistoryExpireDays = 366
-MissingExpireDays = 30
+HistoryKeepDays = 366 # how long to keep history
+RecentlySeenDays = 30 # how long to show a "recently seen" node in the green list
 
 # Always include the following servers in the startfrom list
 StartFrom = [
@@ -77,9 +76,9 @@ HostAliases = {
 
 now = Time.now.utc
 ISOTimestamp = now.iso8601
-MissingExpireLimit = (now - MissingExpireDays*86400).iso8601
-HistoryExpireLimit = (now - HistoryExpireDays*86400).iso8601
-Log.info("Time now %s; Missing node expiry %s; History expiry %s" % [ ISOTimestamp, MissingExpireLimit, HistoryExpireLimit ])
+RecentlySeenLimit = (now - RecentlySeenDays*86400).iso8601
+HistoryKeepLimit = (now - HistoryKeepDays*86400).iso8601
+Log.info("Time now %s; Recently seen since %s; History begins %s" % [ ISOTimestamp, RecentlySeenLimit, HistoryKeepLimit ])
 
 # don't use iso8601 in filenames, the colons will break scp
 OutDirTimestamp = '%04d%02d%02d-%02d%02d%02d' % [now.year, now.month, now.day, now.hour, now.min, now.sec]
@@ -441,6 +440,7 @@ def walk_from(server)
   # Put it in the DOT comments for now but otherwise say nothing
   PersistentState['servers'][server]['history'] ||= {}
   reliability = nines(PersistentState['servers'][server]['history'])
+  Log.warn("History of #{server} demonstrates #{nines} nines reliability")
   graph ' "%s" [color=%s, fontcolor=%s, label="%s\\n%s", comment="%s %s %sN"];' % [server, color, fontcolor, nameList, description, status, green_filter, reliability]
   #graph ' "%s" [color=%s, fontcolor=%s, label="%s\\n%s", comment="%s %s"];' % [server, color, fontcolor, nameList, description, status, green_filter || ""]
 
@@ -458,12 +458,12 @@ def walk_from(server)
     PersistentState['servers'][server]['history'][ISOTimestamp]['numkeys'] = numkeys
   end
   # Expire nodes and node history
-  if lastSeen && lastSeen < MissingExpireLimit
-    Log.warn("#{server} was last seen at #{lastSeen}, before #{MissingExpireLimit}; demoting")
+  if lastSeen && lastSeen < RecentlySeenLimit
+    Log.warn("#{server} was last seen at #{lastSeen}, before #{RecentlySeenLimit}; demoting")
     PersistentState['servers'][server].delete('lastSeen')
   end
   PersistentState['servers'][server]['history'].keys.each do |timestamp|
-    if timestamp < HistoryExpireLimit
+    if timestamp < HistoryKeepLimit
       PersistentState['servers'][server]['history'].delete(timestamp)
     end
   end
