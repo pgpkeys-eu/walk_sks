@@ -23,8 +23,9 @@ Log.level = Logger::INFO
 
 Ourselves = "spider.pgpkeys.eu"
 
-HistoryKeepDays = 366 # how long to keep history
-RecentlySeenDays = 30 # how long to show a "recently seen" node in the green list
+StatsMinHistory = 100 # minimum history entries required for meaningful stats
+HistoryMaxEntries = 500 # maximum history entries to keep
+RecentlySeenDays = 30 # how long to keep a dead node around before clearing its history
 
 # Always include the following servers in the startfrom list
 StartFrom = [
@@ -77,8 +78,7 @@ HostAliases = {
 now = Time.now.utc
 ISOTimestamp = now.iso8601
 RecentlySeenLimit = (now - RecentlySeenDays*86400).iso8601
-HistoryKeepLimit = (now - HistoryKeepDays*86400).iso8601
-Log.info("Time now %s; Recently seen since %s; History begins %s" % [ ISOTimestamp, RecentlySeenLimit, HistoryKeepLimit ])
+Log.info("Time now %s; Recently seen since %s; History length %s" % [ ISOTimestamp, RecentlySeenLimit, HistoryMaxEntries ])
 
 # don't use iso8601 in filenames, the colons will break scp
 OutDirTimestamp = '%04d%02d%02d-%02d%02d%02d' % [now.year, now.month, now.day, now.hour, now.min, now.sec]
@@ -186,6 +186,7 @@ def preen_connections()
     peers = filter_peers(Servers[server])
     PersistentState['servers'][server]['peers'] = peers
     Servers[server] = peers
+
   end
 end
 
@@ -259,11 +260,10 @@ def filter_peers(peers)
 end
 
 def nines(history)
-  # Get the frequency of "ok" statuses in N-nines format (as an integer)
-  statuses = history.values.map { |moment| moment['status'] }
-  return 0 if history.size == 0
-  nineDigits = 0.5-Math.log10(1-statuses.count("ok").fdiv(history.size))
-  return 0 if nineDigits.infinite?
+  # Get the frequency of "." statuses in N-nines format (as an integer)
+  return "?" if history.length < StatsMinHistory
+  nineDigits = 0.5-Math.log10(1-history.count(".").fdiv(history.size))
+  return "?" if nineDigits.infinite?
   return nineDigits.to_i
 end
 
@@ -285,14 +285,15 @@ def walk_from(server)
   Log.info("%3d visited; walking from %s" % [Servers.keys.size, server])
 
   # Hardcode canonical's nonstandard hkpPort
-  # We should be able to do better than this!
-  # e.g. `nc -N $host 11370 </dev/null` and parse the configuration blob
   if host =~ /\.canonical\.com$/
     hkpPort = 11001
-  elsif PersistentState['servers'][server]['hkpPort']
-    hkpPort = PersistentState['servers'][server]['hkpPort']
+  # Ignore persistent state as we don't yet dynamically detect
+  #elsif PersistentState['servers'][server]['hkpPort']
+  #  hkpPort = PersistentState['servers'][server]['hkpPort']
   else
-    hkpPort = 11371
+    # Only a server's peers can query its recon service to obtain the hkpPort
+    # so let's make a sweeping assumption.
+    hkpPort = reconPort.to_i + 1
   end
 
   uri = 'http://%s:%s/%s' % [host, hkpPort, StatsPage]
@@ -357,28 +358,35 @@ def walk_from(server)
       end
     end
 
+  # These errors can be load-related or otherwise transitory.
   rescue Net::OpenTimeout, Errno::ENETUNREACH, Errno::EHOSTUNREACH, Errno::ECONNREFUSED => e
-    color, fontcolor, status, Thread.current[:output] = 'yellow', 'black', e.class, 'R'
-  rescue Net::ReadTimeout => e
-    color, fontcolor, status, Thread.current[:output] = 'red', 'black', e.class, 'T'
-  rescue OpenURI::HTTPRedirect => e
-    color, fontcolor, status, Thread.current[:output] = 'grey90', 'red', e.class, 'N'
+    color, fontcolor, status, statusByte = 'yellow', 'black', e.class, 'R'
   rescue OpenURI::HTTPError, OpenSSL::SSL::SSLError => e
-    color, fontcolor, status, Thread.current[:output] = 'orange', 'black', e.class, 'S'
+    color, fontcolor, status, statusByte = 'orange', 'black', e.class, 'S'
+  rescue Net::ReadTimeout => e
+    color, fontcolor, status, statusByte = 'red', 'black', e.class, 'T'
+
+  # These errors tend to be due to nonexistence or misconfiguration.
+  rescue OpenURI::HTTPRedirect => e
+    # We should probably catch this and follow, but that means detecting loops
+    color, fontcolor, status, statusByte = 'grey90', 'red', e.class, 'N'
   rescue NoMethodError
     # Attempted to dereference nil (does not serve ?op=stats perhaps?)
     # ABG: NB this also catches my sloppy programming errors :-)
-    color, fontcolor, status, Thread.current[:output] = 'grey90', 'black', 'Not a keyserver', 'N'
+    color, fontcolor, status, statusByte = 'grey90', 'blue', 'Not a keyserver', 'N'
   rescue SocketError
-    color, fontcolor, status, Thread.current[:output] = 'grey90', 'black', 'No such server', 'N'
+    color, fontcolor, status, statusByte = 'grey90', 'black', 'No such server', 'N'
   rescue Exception => e
-    color, fontcolor, status, Thread.current[:output] = 'black', 'white', e.class, '?'
+    color, fontcolor, status, statusByte = 'black', 'white', e.class, '?'
+
   else
-    color, status, Thread.current[:output] =  'green', 'ok', '.'
+    color, status, statusByte = 'green', 'ok', '.'
     PersistentState['servers'][server]['lastSeen'] = ISOTimestamp
     PersistentState['servers'][server]['hkpPort'] = hkpPort
     PersistentState['servers'][server]['software'] = software
   end
+
+  Thread.current[:output] = statusByte
 
   if ! software
     if PersistentState['servers'][server]['software']
@@ -400,9 +408,17 @@ def walk_from(server)
     description = software
   end
 
-  if status != "ok" && PersistentState['servers'][server]['lastSeen']
+  recordHistory = false
+  greenFilter = "fail"
+  if status == "ok"
+    recordHistory = true
+    greenFilter = "pass"
+  elsif PersistentState['servers'][server]['lastSeen']
     lastSeen = PersistentState['servers'][server]['lastSeen']
     description = "%s\\nLast seen: %s" % [description, lastSeen]
+    # the server may come back shortly, so keep recording stats
+    recordHistory = true
+    greenFilter = "pass"
   end
 
   # Compare numkeys to a running floor, and warn if the current value is low
@@ -414,6 +430,7 @@ def walk_from(server)
   elsif status == 'ok'
     status = 'slow'
     color = 'darkcyan'
+    statusByte = '-'
   end
 
   # Keep note of the good servers for next time
@@ -432,40 +449,35 @@ def walk_from(server)
     nameList = host
   end
 
-  # Graph the node now, we'll graph the connections later
-  if status == "ok" || status == "slow" || lastSeen
-    green_filter = "pass"
+  # populate history and calculate reliability stats
+  # the history can get very large, so let's keep it compact
+  reliability="?"
+  if recordHistory == true
+    PersistentState['servers'][server]['history'] ||= ""
+    if PersistentState['servers'][server]['history'].length >= HistoryMaxEntries
+      PersistentState['servers'][server]['history'].slice!(0)
+    end
+    PersistentState['servers'][server]['history'] << statusByte
+    reliability = nines(PersistentState['servers'][server]['history'])
+    Log.warn("History of %s demonstrates %s nines reliability" % [server, reliability])
+  else
+    PersistentState['servers'][server]['history'] = ""
   end
-  # Reliability in nines is pretty meaningless until we have LOTS of history
-  # Put it in the DOT comments for now but otherwise say nothing
-  PersistentState['servers'][server]['history'] ||= {}
-  reliability = nines(PersistentState['servers'][server]['history'])
-  Log.warn("History of #{server} demonstrates #{nines} nines reliability")
-  graph ' "%s" [color=%s, fontcolor=%s, label="%s\\n%s", comment="%s %s %sN"];' % [server, color, fontcolor, nameList, description, status, green_filter, reliability]
-  #graph ' "%s" [color=%s, fontcolor=%s, label="%s\\n%s", comment="%s %s"];' % [server, color, fontcolor, nameList, description, status, green_filter || ""]
+
+  # Graph the node now, we'll graph the connections later
+  graph ' "%s" [color=%s, fontcolor=%s, label="%s\\n%s %sN", comment="%s %s"];' % [server, color, fontcolor, nameList, description, reliability, status, greenFilter]
+
+  # Expire nodes and node history
+  if lastSeen && lastSeen < RecentlySeenLimit
+    Log.warn("#{server} was last seen at #{lastSeen}, before #{RecentlySeenLimit}; demoting")
+    PersistentState['servers'][server].delete('lastSeen')
+  end
 
   peers = filter_peers(peers)
   if peers.size == 0 && PersistentState['servers'][server]['peers'] && PersistentState['servers'][server]['peers'].length != 0
     Log.warn("#{server} returned no peers, falling back to cache")
     # run persisted peers through the filter, just to be sure
     peers = filter_peers(PersistentState['servers'][server]['peers'])
-  end
-
-  PersistentState['servers'][server]['history'][ISOTimestamp] = {
-    'status' => status
-  }
-  if numkeys
-    PersistentState['servers'][server]['history'][ISOTimestamp]['numkeys'] = numkeys
-  end
-  # Expire nodes and node history
-  if lastSeen && lastSeen < RecentlySeenLimit
-    Log.warn("#{server} was last seen at #{lastSeen}, before #{RecentlySeenLimit}; demoting")
-    PersistentState['servers'][server].delete('lastSeen')
-  end
-  PersistentState['servers'][server]['history'].keys.each do |timestamp|
-    if timestamp < HistoryKeepLimit
-      PersistentState['servers'][server]['history'].delete(timestamp)
-    end
   end
 
   PersistentState['servers'][server]['status'] = status
