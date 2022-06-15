@@ -24,7 +24,7 @@ Log.level = Logger::INFO
 Ourselves = "spider.pgpkeys.eu"
 
 StatsMinHistory = 100 # minimum history entries required for meaningful stats
-HistoryMaxEntries = 500 # maximum history entries to keep
+HistoryMaxEntries = 1500 # this allows us to measure three nines
 RecentlySeenDays = 30 # how long to keep a dead node around before clearing its history
 
 # Always include the following servers in the startfrom list
@@ -262,8 +262,9 @@ end
 def nines(history)
   # Get the frequency of "." statuses in N-nines format (as an integer)
   return nil if history.length < StatsMinHistory
-  # Divide by history.size+1 so that we never produce infinite nines
-  nineDigits = 0.5-Math.log10(1-history.count(".").fdiv(history.size+1))
+  # Divide by history.size+1 so that we can never report 0% errors
+  errorRate = 1-history.count(".").fdiv(history.size+1)
+  nineDigits = 0.5-Math.log10(errorRate)
   # But just in case...
   return nil if nineDigits.infinite?
   return nineDigits.to_i
