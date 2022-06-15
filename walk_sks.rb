@@ -261,9 +261,11 @@ end
 
 def nines(history)
   # Get the frequency of "." statuses in N-nines format (as an integer)
-  return "?" if history.length < StatsMinHistory
-  nineDigits = 0.5-Math.log10(1-history.count(".").fdiv(history.size))
-  return "?" if nineDigits.infinite?
+  return nil if history.length < StatsMinHistory
+  # Divide by history.size+1 so that we never produce infinite nines
+  nineDigits = 0.5-Math.log10(1-history.count(".").fdiv(history.size+1))
+  # But just in case...
+  return nil if nineDigits.infinite?
   return nineDigits.to_i
 end
 
@@ -451,7 +453,6 @@ def walk_from(server)
 
   # populate history and calculate reliability stats
   # the history can get very large, so let's keep it compact
-  reliability="?"
   if recordHistory == true
     PersistentState['servers'][server]['history'] ||= ""
     if PersistentState['servers'][server]['history'].length >= HistoryMaxEntries
@@ -459,13 +460,16 @@ def walk_from(server)
     end
     PersistentState['servers'][server]['history'] << statusByte
     reliability = nines(PersistentState['servers'][server]['history'])
-    Log.warn("History of %s demonstrates %s nines reliability" % [server, reliability])
+    if reliability
+      description << " %dN" % [ reliability ]
+      Log.warn("History of %s demonstrates %s nines reliability" % [server, reliability])
+    end
   else
     PersistentState['servers'][server]['history'] = ""
   end
 
   # Graph the node now, we'll graph the connections later
-  graph ' "%s" [color=%s, fontcolor=%s, label="%s\\n%s %sN", comment="%s %s"];' % [server, color, fontcolor, nameList, description, reliability, status, greenFilter]
+  graph ' "%s" [color=%s, fontcolor=%s, label="%s\\n%s", comment="%s %s"];' % [server, color, fontcolor, nameList, description, status, greenFilter]
 
   # Expire nodes and node history
   if lastSeen && lastSeen < RecentlySeenLimit
