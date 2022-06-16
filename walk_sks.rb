@@ -363,24 +363,29 @@ def walk_from(server)
 
   # These errors can be load-related or otherwise transitory.
   rescue Net::OpenTimeout, Errno::ENETUNREACH, Errno::EHOSTUNREACH, Errno::ECONNREFUSED => e
-    color, fontcolor, status, statusByte = 'yellow', 'black', e.class, 'R'
+    # The service is either down, or firewalled; impossible to be sure which
+    color, fontcolor, status, statusByte = 'yellow', 'black', e.class, 'R' # REFUSED
   rescue OpenURI::HTTPError, OpenSSL::SSL::SSLError => e
-    color, fontcolor, status, statusByte = 'orange', 'black', e.class, 'S'
+    # Protocol error; this is usually load-related
+    color, fontcolor, status, statusByte = 'orange', 'black', e.class, 'P' # PROTOCOL
   rescue Net::ReadTimeout => e
-    color, fontcolor, status, statusByte = 'red', 'black', e.class, 'T'
+    # Read timeout is also normally a load issue
+    color, fontcolor, status, statusByte = 'red', 'black', e.class, 'T' # TIMEOUT
 
   # These errors tend to be due to nonexistence or misconfiguration.
   rescue OpenURI::HTTPRedirect => e
-    # We should probably catch this and follow, but that means detecting loops
-    color, fontcolor, status, statusByte = 'grey90', 'red', e.class, 'N'
+    # Not all client software will follow an indirection, so we won't either
+    color, fontcolor, status, statusByte = 'grey90', 'red', e.class, 'I' # INDIRECTION
   rescue NoMethodError
     # Attempted to dereference nil (does not serve ?op=stats perhaps?)
     # ABG: NB this also catches my sloppy programming errors :-)
-    color, fontcolor, status, statusByte = 'grey90', 'blue', 'Not a keyserver', 'N'
+    color, fontcolor, status, statusByte = 'grey90', 'blue', 'Not a keyserver', 'N' # NIL
   rescue SocketError
-    color, fontcolor, status, statusByte = 'grey90', 'black', 'No such server', 'N'
+    # This error is thrown if the DNS does not resolve
+    color, fontcolor, status, statusByte = 'grey90', 'black', 'No such server', 'S' # SOCKET
   rescue Exception => e
-    color, fontcolor, status, statusByte = 'black', 'white', e.class, '?'
+    # We're not in Kansas any more, Toto
+    color, fontcolor, status, statusByte = 'black', 'white', e.class, '?' # UNEXPECTED
 
   else
     color, status, statusByte = 'green', 'ok', '.'
