@@ -39,7 +39,7 @@ Status = {}
 # We do not verify mailsync peers (email addresses).
 # Also skip unroutable IP addresses, non-fqdn hosts, etc.
 # NB: regexes apply to the space-separated-values Server type, not hostnames.
-ServerExclude =  [
+ServerExclude = [
   /@/,
   /^localhost/,
   /^127\./,
@@ -54,6 +54,16 @@ ServerExclude =  [
   /^ff[0-9a-f][0-9a-f]:/,
   /^[a-zA-Z0-9_-]+\s/
 ]
+# When populating StartFrom, we only want servers with proper DNS names.
+# This prevents bare IPs from becoming irretrievably stuck in the cache.
+StrictServerExclude = [
+  /@/,
+  /^localhost/,
+  /^[0-9]+\./,
+  /^[0-9a-f]+:/,
+  /^[a-zA-Z0-9_-]+\s/
+]
+
 # Some servers have obfuscated peering connections via unroutable bare ips.
 # Some DNS hosts have CNAMEs. We maintain them by hand for now.
 # Note that HTTP redirects/proxies DO NOT affect the recon protocol.
@@ -74,6 +84,14 @@ HostAliases = {
   "keyserver.ubuntu.com" => ["10.15.42.5", "10.15.42.9"], # hockeypuck-0, hockeypuck-1
   "keyserver1.canonical.com" => ["10.15.42.21"]           # hockeypuck-external-0
 }
+# Generate the inverse of the host aliases map for convenience
+HostCanonicals = {}
+HostAliases.each do | primary, alts |
+  alts.each do | alt |
+    HostCanonicals[alt] = primary
+  end
+end
+AliasesMutex = Mutex.new
 
 now = Time.now.utc
 ISOTimestamp = now.iso8601
@@ -94,34 +112,17 @@ GreenDot = File.open(File.join(OutDir, 'walk-sks.green.dot'), 'w')
 StateCache = File.join(SksStatusDir, 'state.cache')
 if File.exist?(StateCache)
   PersistentState = JSON.parse(File.read(StateCache))
+  PersistentState.delete('INIT') # no longer used
 else
   PersistentState = {}
 end
-
 PersistentState['servers'] ||= {}
-
-if PersistentState['INIT']
-  # Merge the hardcoded and cached lists of initial servers.
-  # No need to deduplicate here, as walk_from() does it below.
-  StartFrom.concat(PersistentState['INIT'])
-end
-# We recalculate INIT every time from the discovered state
-PersistentState['INIT'] = []
 
 ## Unsolved problem - how to cache-expire persisted discovered aliases?
 #if PersistentState['aliases']
 #  # Merge the hardcoded and cached lists of host aliases.
 #  HostAliases.concat(PersistentState['aliases'])
 #end
-
-# Generate the inverse of the host aliases map for convenience
-HostCanonicals = {}
-HostAliases.each do | primary, alts |
-  alts.each do | alt |
-    HostCanonicals[alt] = primary
-  end
-end
-AliasesMutex = Mutex.new
 
 MeanKeys = { 'mean' => 0, 'count' => 0, 'mutex' => Mutex.new }
 if PersistentState['meankeys']
@@ -183,10 +184,7 @@ end
 def preen_connections()
   # Filter all peer lists one last time to catch any racy updates
   Servers.keys.each do |server|
-    peers = filter_peers(Servers[server])
-    PersistentState['servers'][server]['peers'] = peers
-    Servers[server] = peers
-
+    Servers[server]['peers'] = filter_peers(Servers[server]['peers'])
   end
 end
 
@@ -196,10 +194,10 @@ def graph_connections()
   # only graph the servers discovered in this run, not the full cache
   Servers.keys.each do |server|
     mutualsDrawn[server] = []
-    (Servers[server] || []).each do |peer|
+    (Servers[server]['peers'] || []).each do |peer|
       # Skip if we already drew our own inverse, or if the link is reflexive
-      if ! (mutualsDrawn[peer] && mutualsDrawn[peer].include?(server)) && server != peer
-        if Servers[peer] && Servers[peer].include?(server)
+      if ! mutualsDrawn[peer]&.include?(server) && server != peer
+        if Servers.dig(peer, 'peers')&.include?(server)
           # Draw a mutual as a heavy, directionless line.
           attributes = "color=black, dir=both, arrowsize=0.5, penwidth=2, weight=3"
           # Remind ourselves to skip the second, inverse link
@@ -242,20 +240,19 @@ def greenify(data)
   return res
 end
 
-def filter_peers(peers)
+def filter_peers(peers, exclusionList = ServerExclude)
   peers = peers.map do |peer|
-    peer.downcase!
     # Canonicalize "host:reconPort" to "host reconPort"
-    if peer =~ /^([[:alnum:].-]+)(\s+|:)(\d+)$/
+    if peer.downcase =~ /^([[:alnum:].-]+)(\s+|:)(\d+)$/
       "%s %s" % [ ( HostCanonicals[$1] || $1 ), $3 ]
-    elsif peer =~ /^(.*:.*:.*)(\s+|:)(\d+)$/
+    elsif peer.downcase =~ /^(.*:.*:.*)(\s+|:)(\d+)$/
       # If it has two or more colons in it, then it's IPv6 :-)
       "[%s] %s" % [ ( HostCanonicals[$1] || $1 ), $3 ]
     end
   end
-  # Do not consider peers on the ServerExclude list, and remove nils
+  # Do not consider peers on the exclusion list, and remove nils
   return peers.compact.reject do |peer|
-    peer.match?(Regexp.union(ServerExclude))
+    peer.match?(Regexp.union(exclusionList))
   end
 end
 
@@ -281,8 +278,7 @@ def walk_from(server)
   end
 
   return nil if Servers.has_key?(server) # Already visited
-  Servers[server] = [] # Populate immediately to block duplicate threads
-  PersistentState['servers'][server] ||= {}
+  Servers[server] = {} # Populate immediately to block duplicate threads
   peers = []
 
   Log.info("%3d visited; walking from %s" % [Servers.keys.size, server])
@@ -290,9 +286,10 @@ def walk_from(server)
   # Hardcode canonical's nonstandard hkpPort
   if host =~ /\.canonical\.com$/
     hkpPort = 11001
-  # Ignore persistent state as we don't yet dynamically detect
-  #elsif PersistentState['servers'][server]['hkpPort']
-  #  hkpPort = PersistentState['servers'][server]['hkpPort']
+  #elsif hkpPort = PersistentState.dig('servers', server, 'hkpPort')
+  #  # Ignore persistent state as we don't yet dynamically detect
+  #  # Hockeypuck does advertise the hkpPort of its peers, but peer configs
+  #  # are fallible, so what happens if they disagree?
   else
     # Only a server's peers can query its recon service to obtain the hkpPort
     # so let's make a sweeping assumption.
@@ -364,18 +361,18 @@ def walk_from(server)
   # These errors can be load-related or otherwise transitory.
   rescue Net::OpenTimeout, Errno::ENETUNREACH, Errno::EHOSTUNREACH, Errno::ECONNREFUSED => e
     # The service is either down, or firewalled; impossible to be sure which
-    color, fontcolor, status, statusByte = 'yellow', 'black', e.class, 'R' # REFUSED
+    color, fontcolor, status, statusByte = 'yellow', 'black', e.class.name, 'R' # REFUSED
   rescue OpenURI::HTTPError, OpenSSL::SSL::SSLError => e
     # Protocol error; this is usually load-related
-    color, fontcolor, status, statusByte = 'orange', 'black', e.class, 'P' # PROTOCOL
+    color, fontcolor, status, statusByte = 'orange', 'black', e.class.name, 'P' # PROTOCOL
   rescue Net::ReadTimeout => e
     # Read timeout is also normally a load issue
-    color, fontcolor, status, statusByte = 'red', 'black', e.class, 'T' # TIMEOUT
+    color, fontcolor, status, statusByte = 'red', 'black', e.class.name, 'T' # TIMEOUT
 
   # These errors tend to be due to nonexistence or misconfiguration.
   rescue OpenURI::HTTPRedirect => e
     # Not all client software will follow an indirection, so we won't either
-    color, fontcolor, status, statusByte = 'grey90', 'red', e.class, 'I' # INDIRECTION
+    color, fontcolor, status, statusByte = 'grey90', 'red', e.class.name, 'I' # INDIRECTION
   rescue NoMethodError
     # Attempted to dereference nil (does not serve ?op=stats perhaps?)
     # ABG: NB this also catches my sloppy programming errors :-)
@@ -385,33 +382,32 @@ def walk_from(server)
     color, fontcolor, status, statusByte = 'grey90', 'black', 'No such server', 'S' # SOCKET
   rescue Exception => e
     # We're not in Kansas any more, Toto
-    color, fontcolor, status, statusByte = 'black', 'white', e.class, '?' # UNEXPECTED
+    color, fontcolor, status, statusByte = 'black', 'white', e.class.name, '?' # UNEXPECTED
 
   else
     color, status, statusByte = 'green', 'ok', '.'
-    PersistentState['servers'][server]['lastSeen'] = ISOTimestamp
-    PersistentState['servers'][server]['hkpPort'] = hkpPort
-    PersistentState['servers'][server]['software'] = software
+    Servers[server]['lastSeen'] = ISOTimestamp
+    Servers[server]['hkpPort'] = hkpPort
   end
 
+  # Pass old-style (YAML) output now via the thread gatherer
   Thread.current[:output] = statusByte
+  Status[Thread.current[:output]] ||= []
+  Status[Thread.current[:output]] << server
 
   if ! software
-    if PersistentState['servers'][server]['software']
-      # Assume the server is still running the same software as last time
-      software = "(%s)" % [PersistentState['servers'][server]['software']]
-    end
+    # Assume the server is still running the same software as last time
+    software = PersistentState.dig('servers', server, 'software')
   end
 
   if numkeys
     # Update cached numkeys IFF we got a real numkeys from the server
     # NB: a working server can return no numkeys if it has just been restarted
-    PersistentState['servers'][server]['numkeys'] = numkeys
+    Servers[server]['numkeys'] = numkeys
     description = '%s (%dk)' % [software, numkeys.to_i/1000]
-  elsif PersistentState['servers'][server]['numkeys']
+  elsif cachedNumKeys = PersistentState.dig('servers', server, 'numkeys')
     # use cached numkeys ONLY for display purposes, not for calculations
-    cachedNumkeys = PersistentState['servers'][server]['numkeys']
-    description = '%s (%dk?)' % [software, cachedNumkeys.to_i/1000]
+    description = '%s (%dk?)' % [software, cachedNumKeys.to_i/1000]
   else
     description = software
   end
@@ -421,8 +417,7 @@ def walk_from(server)
   if status == "ok"
     recordHistory = true
     greenFilter = "pass"
-  elsif PersistentState['servers'][server]['lastSeen']
-    lastSeen = PersistentState['servers'][server]['lastSeen']
+  elsif lastSeen = PersistentState.dig('servers', server, 'lastSeen')
     description = "%s\\nLast seen: %s" % [description, lastSeen]
     # the server may come back shortly, so keep recording stats
     recordHistory = true
@@ -441,13 +436,6 @@ def walk_from(server)
     statusByte = '-'
   end
 
-  # Keep note of the good servers for next time
-  if status == 'ok'
-    PersistentState['INIT'].append(server)
-  end
-
-  Status[Thread.current[:output]] ||= []
-  Status[Thread.current[:output]] << server
   if HostCanonicals.has_key?(host)
     canonical = HostCanonicals[host]
     nameList = "%s\\n%s" % [canonical, HostAliases[canonical].join("\\n")]
@@ -457,9 +445,11 @@ def walk_from(server)
     nameList = host
   end
 
-  # populate history and calculate reliability stats
-  # the history can get very large, so let's keep it compact
+  # Populate history and calculate reliability stats
+  # The history can get very large, so let's keep it compact
+  # Operate directly on the cache to avoid keeping two copies in memory
   if recordHistory == true
+    PersistentState['servers'][server] ||= []
     PersistentState['servers'][server]['history'] ||= ""
     if PersistentState['servers'][server]['history'].length >= HistoryMaxEntries
       PersistentState['servers'][server]['history'].slice!(0)
@@ -470,29 +460,22 @@ def walk_from(server)
       description << " %dN" % [ reliability ]
       Log.warn("History of %s demonstrates %s nines reliability" % [server, reliability])
     end
-  else
-    PersistentState['servers'][server]['history'] = ""
   end
 
   # Graph the node now, we'll graph the connections later
   graph ' "%s" [color=%s, fontcolor=%s, label="%s\\n%s", comment="%s %s"];' % [server, color, fontcolor, nameList, description, status, greenFilter]
 
-  # Expire nodes and node history
-  if lastSeen && lastSeen < RecentlySeenLimit
-    Log.warn("#{server} was last seen at #{lastSeen}, before #{RecentlySeenLimit}; demoting")
-    PersistentState['servers'][server].delete('lastSeen')
-  end
-
   peers = filter_peers(peers)
-  if peers.size == 0 && PersistentState['servers'][server]['peers'] && PersistentState['servers'][server]['peers'].length != 0
+  if peers.size == 0 && (PersistentState.dig('servers', server, 'peers') || []).size > 0
     Log.warn("#{server} returned no peers, falling back to cache")
     # run persisted peers through the filter, just to be sure
     peers = filter_peers(PersistentState['servers'][server]['peers'])
   end
 
-  PersistentState['servers'][server]['status'] = status
-  PersistentState['servers'][server]['peers'] = peers
-  Servers[server] = peers
+  # Update the running state
+  Servers[server]['status'] = status
+  Servers[server]['peers'] = peers
+  Servers[server]['software'] = software
 
   fork(server, peers)
 end
@@ -547,8 +530,11 @@ Log.info('Starting SKS network probe and analysis')
   green_graph lin
 }
 
-# Clean StartFrom before use; we don't know where PersistentState['INIT'] has been
-fork('INIT', filter_peers(StartFrom))
+# Add any servers found in the persistent cache to the initial list.
+# Filter them through the strict exclusion to eliminate any bare IPs.
+StartFrom.concat(filter_peers(PersistentState['servers'].keys, StrictServerExclude))
+fork('INIT', StartFrom)
+
 preen_connections()
 graph_connections()
 graph '}'
@@ -574,7 +560,15 @@ system('ln', '-sf', File.join(OutDirTimestamp, 'walk-sks.yaml'), SksStatusDir)
 system('ln', '-sf', File.join(OutDirTimestamp, 'walk-sks.green.dot.svg'), SksStatusDir)
 system('ln', '-sf', File.join(OutDirTimestamp, 'walk-sks.dot.svg'), SksStatusDir)
 
-# Update and save our state cache
+Log.info('Updating state cache.')
+
+# Expire server history
+PersistentState['servers'].reject! do |name, server|
+  ! server['lastSeen'] || server['lastSeen'] < RecentlySeenLimit
+end
+# Merge updates (NOT a deep merge, modified server entries will be overwritten)
+PersistentState['servers'].merge Servers
+# Hints for next run
 PersistentState['meankeys'] = MeanKeys['mean']
 PersistentState['aliases'] = HostAliases
 File.write(StateCache, JSON.dump(PersistentState))
