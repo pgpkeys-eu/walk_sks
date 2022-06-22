@@ -376,10 +376,10 @@ def walk_from(server)
     Log.debug("#{server} threw error #{e.class.name} - The service is either down, or firewalled; impossible to be sure which")
     color, fontcolor, status, statusByte = 'yellow', 'black', e.class.name, 'R' # REFUSED
   rescue OpenURI::HTTPError, OpenSSL::SSL::SSLError => e
-    Log.debug("#{server} threw error #{e.class.name} - Normally a load issue")
-    color, fontcolor, status, statusByte = 'orange', 'black', e.class.name, 'P' # PROTOCOL
+    Log.debug("#{server} threw error #{e.class.name} - A reverse proxy error, perhaps an overloaded (or stopped) back end")
+    color, fontcolor, status, statusByte = 'orange', 'black', e.class.name, 'P' # PROXY
   rescue Net::ReadTimeout => e
-    Log.debug("#{server} threw error #{e.class.name} - Normally a load issue")
+    Log.debug("#{server} threw error #{e.class.name} - An overloaded server, with no reverse proxy configured")
     color, fontcolor, status, statusByte = 'red', 'black', e.class.name, 'T' # TIMEOUT
 
   # These errors tend to be due to nonexistence or misconfiguration.
