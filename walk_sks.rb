@@ -462,7 +462,7 @@ def walk_from(server)
   # Operate directly on the cache to avoid keeping two copies in memory
   if recordHistory == true
     Log.debug("#{server} updating history")
-    PersistentState['servers'][server] ||= []
+    PersistentState['servers'][server] ||= {}
     PersistentState['servers'][server]['history'] ||= ""
     if PersistentState['servers'][server]['history'].length >= HistoryMaxEntries
       Log.debug("#{server} history is full, truncating")
