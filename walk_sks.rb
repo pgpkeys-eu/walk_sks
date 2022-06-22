@@ -73,7 +73,7 @@ HostAliases = {
   "hkp.openpgpkeys.net" => ["pgp.gwolf.org"],
   "keyserver1.computer42.org" => ["keyserver.computer42.org"],
   "gozer.rediris.es" => ["pgp.rediris.es"], # pgp is a round-robin for zuul and gozer, but zuul is currently broken
-  "pgp.surf.nl" => ["pgp.surfnet.nl"],
+  "pgp.surf.nl" => ["pgp.surfnet.nl", "pgp-ng.surf.nl"],
   "sks.pyro.eu.org" => ["keyserver.sincer.us"],
   "openpgp.circl.lu" => ["pgp.circl.lu"],
   "keywin.trifence.ch" => ["keyserver.trifence.ch"],
@@ -301,18 +301,26 @@ def walk_from(server)
   begin
     Log.info('Opening server at %s' % uri)
     stats = Nokogiri(URI.open(uri, options = {:redirect => false}))
+    Log.debug("#{server} Opened stats page")
     begin
       # Prefer JSON parsing
       struct = JSON.parse(stats.search('p').first)
+      Log.debug("#{server} Detected JSON stats page")
+      Log.debug("#{server} JSON = #{struct}")
       selfHostname = struct["hostname"]
+      Log.debug("#{server} hostname = #{selfHostname}")
       selfNodename = struct["nodename"]
-      peers = struct["peers"].map { |peer| peer["reconAddr"] }
+      Log.debug("#{server} nodename = #{selfNodename}")
+      peers = (struct["peers"] || []).map { |peer| peer["reconAddr"] }
+      Log.debug("#{server} peers = #{peers}")
       numkeys = struct["numkeys"] || struct["Total"]
+      Log.debug("#{server} numkeys = #{numkeys}")
       software = struct["software"]
+      Log.debug("#{server} software = #{software}")
       fontcolor = "white"
-      Log.info("Parsed JSON stats page for #{server}")
+      Log.debug("#{server} Parsed JSON stats page")
     rescue
-      # fall back to HTML DOM parsing
+      Log.debug("#{server} Falling back to HTML stats")
       settingsRows = stats.xpath('//*[@summary="Keyserver Settings"]/tr')
       settingsMap = {}
       settingsRows.each do |tr|
@@ -321,17 +329,22 @@ def walk_from(server)
         settingsMap[key] = value
       end
       selfHostname = settingsMap['Hostname']
+      Log.debug("#{server} hostname = #{selfHostname}")
       selfNodename = settingsMap['Nodename']
+      Log.debug("#{server} nodename = #{selfNodename}")
       peers = stats.xpath('//*[@summary="Gossip Peers"]').first.search('td').map {|td| td.inner_text}
+      Log.debug("#{server} peers = #{peers}")
       title = stats.search('title').first.inner_text
       if title =~ /^(\w+) /
         software = $1
+        Log.debug("#{server} software = #{software}")
       else
         software = "(unknown)"
       end
       numkeys = stats.search('p').map {|p| p.inner_text =~ /^Total number of keys: (\d+)$/ && $1}.compact.first
+      Log.debug("#{server} numkeys = #{numkeys}")
       fontcolor = "yellow"
-      Log.info("Parsed HTML stats page for #{server}")
+      Log.debug("#{server} Parsed HTML stats page")
     end
 
     if selfHostname && selfHostname != host
@@ -343,16 +356,16 @@ def walk_from(server)
         # This is a new, non-excluded alias, make a note of it for the future.
         if Servers.has_key?(filterSelfServer)
           # Another thread got here already; make like a hole in the water
-          Log.info("Already seen '#{filterSelfServer}', skipping '#{server}'")
+          Log.debug("Already seen '#{filterSelfServer}', skipping '#{server}'")
           Servers.delete(server)
           PersistentState['servers'].delete(server)
           # Add ourselves to the list of aliases of the "real" server
-          Log.info("Adding alias '#{server}' for '#{filterSelfServer}'")
+          Log.debug("Adding alias '#{server}' for '#{filterSelfServer}'")
           update_aliases(server, filterSelfServer)
           return nil
         else
           # We are first, add selfServer as alias of us to block other threads
-          Log.info("Adding alias '#{filterSelfServer}' for '#{server}'")
+          Log.debug("Adding alias '#{filterSelfServer}' for '#{server}'")
           update_aliases(filterSelfServer, server)
         end
       end
@@ -360,28 +373,27 @@ def walk_from(server)
 
   # These errors can be load-related or otherwise transitory.
   rescue Net::OpenTimeout, Errno::ENETUNREACH, Errno::EHOSTUNREACH, Errno::ECONNREFUSED => e
-    # The service is either down, or firewalled; impossible to be sure which
+    Log.debug("#{server} threw error #{e.class.name} - The service is either down, or firewalled; impossible to be sure which")
     color, fontcolor, status, statusByte = 'yellow', 'black', e.class.name, 'R' # REFUSED
   rescue OpenURI::HTTPError, OpenSSL::SSL::SSLError => e
-    # Protocol error; this is usually load-related
+    Log.debug("#{server} threw error #{e.class.name} - Normally a load issue")
     color, fontcolor, status, statusByte = 'orange', 'black', e.class.name, 'P' # PROTOCOL
   rescue Net::ReadTimeout => e
-    # Read timeout is also normally a load issue
+    Log.debug("#{server} threw error #{e.class.name} - Normally a load issue")
     color, fontcolor, status, statusByte = 'red', 'black', e.class.name, 'T' # TIMEOUT
 
   # These errors tend to be due to nonexistence or misconfiguration.
   rescue OpenURI::HTTPRedirect => e
-    # Not all client software will follow an indirection, so we won't either
+    Log.debug("#{server} threw error #{e.class.name} - Not all client software will follow an indirection, so we won't either")
     color, fontcolor, status, statusByte = 'grey90', 'red', e.class.name, 'I' # INDIRECTION
   rescue NoMethodError
-    # Attempted to dereference nil (does not serve ?op=stats perhaps?)
-    # ABG: NB this also catches my sloppy programming errors :-)
+    Log.debug("#{server} threw error #{e.class.name} - Attempted to dereference nil (does not serve op=stats, or this code is buggy)")
     color, fontcolor, status, statusByte = 'grey90', 'blue', 'Not a keyserver', 'N' # NIL
   rescue SocketError
-    # This error is thrown if the DNS does not resolve
+    Log.debug("#{server} threw error #{e.class.name} - This error is thrown if the DNS does not resolve")
     color, fontcolor, status, statusByte = 'grey90', 'black', 'No such server', 'S' # SOCKET
   rescue Exception => e
-    # We're not in Kansas any more, Toto
+    Log.debug("#{server} threw error #{e.class.name} - We're not in Kansas any more, Toto")
     color, fontcolor, status, statusByte = 'black', 'white', e.class.name, '?' # UNEXPECTED
 
   else
@@ -396,17 +408,16 @@ def walk_from(server)
   Status[Thread.current[:output]] << server
 
   if ! software
-    # Assume the server is still running the same software as last time
+    Log.debug("#{server} Assume the server is still running the same software as last time")
     software = PersistentState.dig('servers', server, 'software')
   end
 
   if numkeys
-    # Update cached numkeys IFF we got a real numkeys from the server
     # NB: a working server can return no numkeys if it has just been restarted
     Servers[server]['numkeys'] = numkeys
     description = '%s (%dk)' % [software, numkeys.to_i/1000]
   elsif cachedNumKeys = PersistentState.dig('servers', server, 'numkeys')
-    # use cached numkeys ONLY for display purposes, not for calculations
+    Log.debug("#{server} Using cached numkeys for display (not for calculations)")
     description = '%s (%dk?)' % [software, cachedNumKeys.to_i/1000]
   else
     description = software
@@ -419,7 +430,7 @@ def walk_from(server)
     greenFilter = "pass"
   elsif lastSeen = PersistentState.dig('servers', server, 'lastSeen')
     description = "%s\\nLast seen: %s" % [description, lastSeen]
-    # the server may come back shortly, so keep recording stats
+    Log.debug("#{server} may come back shortly, so keep recording stats")
     recordHistory = true
     greenFilter = "pass"
   end
@@ -431,6 +442,7 @@ def walk_from(server)
       update_mean(numkeys.to_i)
     end
   elsif status == 'ok'
+    Log.debug("#{server} is up but below the floor; marking as slow")
     status = 'slow'
     color = 'darkcyan'
     statusByte = '-'
@@ -449,16 +461,18 @@ def walk_from(server)
   # The history can get very large, so let's keep it compact
   # Operate directly on the cache to avoid keeping two copies in memory
   if recordHistory == true
+    Log.debug("#{server} updating history")
     PersistentState['servers'][server] ||= []
     PersistentState['servers'][server]['history'] ||= ""
     if PersistentState['servers'][server]['history'].length >= HistoryMaxEntries
+      Log.debug("#{server} history is full, truncating")
       PersistentState['servers'][server]['history'].slice!(0)
     end
     PersistentState['servers'][server]['history'] << statusByte
     reliability = nines(PersistentState['servers'][server]['history'])
     if reliability
       description << " %dN" % [ reliability ]
-      Log.warn("History of %s demonstrates %s nines reliability" % [server, reliability])
+      Log.info("History of %s demonstrates %s nines reliability" % [server, reliability])
     end
   end
 
@@ -467,7 +481,7 @@ def walk_from(server)
 
   peers = filter_peers(peers)
   if peers.size == 0 && (PersistentState.dig('servers', server, 'peers') || []).size > 0
-    Log.warn("#{server} returned no peers, falling back to cache")
+    Log.info("#{server} returned no peers, falling back to cache")
     # run persisted peers through the filter, just to be sure
     peers = filter_peers(PersistentState['servers'][server]['peers'])
   end
