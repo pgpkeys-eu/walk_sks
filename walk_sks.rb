@@ -581,7 +581,7 @@ PersistentState['servers'].reject! do |name, server|
   ! server['lastSeen'] || server['lastSeen'] < RecentlySeenLimit
 end
 # Merge updates (NOT a deep merge, modified server entries will be overwritten)
-PersistentState['servers'].merge Servers
+PersistentState['servers'].merge! Servers
 # Hints for next run
 PersistentState['meankeys'] = MeanKeys['mean']
 PersistentState['aliases'] = HostAliases
