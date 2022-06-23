@@ -580,8 +580,9 @@ Log.info('Updating state cache.')
 PersistentState['servers'].reject! do |name, server|
   ! server['lastSeen'] || server['lastSeen'] < RecentlySeenLimit
 end
-# Merge updates (NOT a deep merge, modified server entries will be overwritten)
-PersistentState['servers'].merge! Servers
+# Merge updates down to second level (member fields of server objects)
+# NOT RECURSIVE:s stale members of third level hashes (i.e. peers) will be deleted
+PersistentState['servers'].merge!(Servers) { |key,value1,value2| value1.merge value2 }
 # Hints for next run
 PersistentState['meankeys'] = MeanKeys['mean']
 PersistentState['aliases'] = HostAliases
