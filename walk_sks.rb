@@ -26,11 +26,11 @@ Ourselves = "spider.pgpkeys.eu"
 StatsMinHistory = 100 # minimum history entries required for meaningful stats
 HistoryMaxEntries = 1500 # this allows us to measure three nines
 RecentlySeenDays = 30 # how long to keep a dead node around before clearing its history
+SlowFloor = 0.995 # fraction of MeanKeys below which we declare a server slow
 
 # Always include the following servers in the startfrom list
 StartFrom = [
   'pgpkeys.eu 11370',
-#  'hkp.openpgpkeys.net 11370', # temporarily down as of 20211217
   'keyserver.ubuntu.com 11370'
 ]
 StatsPage = 'pks/lookup?op=stats&options=mr'
@@ -436,7 +436,7 @@ def walk_from(server)
   end
 
   # Compare numkeys to a running floor, and warn if the current value is low
-  if numkeys.to_i > MeanKeys['mean'] * 0.99
+  if numkeys.to_i > MeanKeys['mean'] * SlowFloor
     if StartFrom.include? server
       # Only consider the starting servers when calculating the floor
       update_mean(numkeys.to_i)
