@@ -26,7 +26,7 @@ Ourselves = "spider.pgpkeys.eu"
 StatsMinHistory = 100 # minimum history entries required for meaningful stats
 HistoryMaxEntries = 1500 # this allows us to measure three nines
 RecentlySeenDays = 30 # how long to keep a dead node around before clearing its history
-SlowFloor = 0.995 # fraction of MeanKeys below which we declare a server slow
+SlowFloor = 0.998 # fraction of MeanKeys below which we declare a server slow
 
 # Always include the following servers in the startfrom list
 StartFrom = [
