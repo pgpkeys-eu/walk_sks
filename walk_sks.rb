@@ -26,6 +26,7 @@ Ourselves = "spider.pgpkeys.eu"
 StatsMinHistory = 100 # minimum history entries required for meaningful stats
 HistoryMaxEntries = 1500 # this allows us to measure three nines
 RecentlySeenDays = 30 # how long to keep a dead node around before clearing its history
+PeerRecentlySeenDays = 1 # how long to cache peer lists (in case we hit non-peer LB workers)
 SlowFloor = 0.998 # fraction of MeanKeys below which we declare a server slow
 
 # Always include the following servers in the startfrom list
@@ -96,7 +97,8 @@ AliasesMutex = Mutex.new
 now = Time.now.utc
 ISOTimestamp = now.iso8601
 RecentlySeenLimit = (now - RecentlySeenDays*86400).iso8601
-Log.info("Time now %s; Recently seen since %s; History length %s" % [ ISOTimestamp, RecentlySeenLimit, HistoryMaxEntries ])
+PeerRecentlySeenLimit = (now - PeerRecentlySeenDays*86400).iso8601
+Log.info("Time now %s; Recently seen since %s; Peer cache since %s, History length %s" % [ ISOTimestamp, RecentlySeenLimit, PeerRecentlySeenLimit, HistoryMaxEntries ])
 
 # don't use iso8601 in filenames, the colons will break scp
 OutDirTimestamp = '%04d%02d%02d-%02d%02d%02d' % [now.year, now.month, now.day, now.hour, now.min, now.sec]
@@ -480,10 +482,18 @@ def walk_from(server)
   graph ' "%s" [color=%s, fontcolor=%s, label="%s\\n%s", comment="%s %s"];' % [server, color, fontcolor, nameList, description, status, greenFilter]
 
   peers = filter_peers(peers)
-  if peers.size == 0 && (PersistentState.dig('servers', server, 'peers') || []).size > 0
-    Log.info("#{server} returned no peers, falling back to cache")
+  numCachedPeers = (PersistentState.dig('servers', server, 'peers') || []).size
+  # If the number of peers returned is less than half the size of the cached
+  # peer list, assume we hit a non-peering load-balanced worker and keep the
+  # cached list. Keep a note of when we last populated the cached peer list
+  # (in general, this will differ from the last time we got a valid status)
+  # so that we can expire the cache.
+  if numCachedPeers > 0 && peers.size < numCachedPeers/2 && (PersistentState.dig('servers', server, 'peersLastSeen') || ISOTimestamp) > PeerRecentlySeenLimit
+    Log.info("#{server} returned short peer list, falling back to cache")
     # run persisted peers through the filter, just to be sure
     peers = filter_peers(PersistentState['servers'][server]['peers'])
+  elsif recordHistory
+    Servers[server]['peersLastSeen'] = ISOTimestamp
   end
 
   # Update the running state
@@ -576,13 +586,13 @@ system('ln', '-sf', File.join(OutDirTimestamp, 'walk-sks.dot.svg'), SksStatusDir
 
 Log.info('Updating state cache.')
 
+# Merge updates down to second level (member fields of server objects)
+# NOT RECURSIVE:s stale members of third level hashes (i.e. peers) will be deleted
+PersistentState['servers'].merge!(Servers) { |key,value1,value2| value1.merge value2 }
 # Expire server history
 PersistentState['servers'].reject! do |name, server|
   ! server['lastSeen'] || server['lastSeen'] < RecentlySeenLimit
 end
-# Merge updates down to second level (member fields of server objects)
-# NOT RECURSIVE:s stale members of third level hashes (i.e. peers) will be deleted
-PersistentState['servers'].merge!(Servers) { |key,value1,value2| value1.merge value2 }
 # Hints for next run
 PersistentState['meankeys'] = MeanKeys['mean']
 PersistentState['aliases'] = HostAliases
