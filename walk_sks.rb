@@ -73,7 +73,7 @@ HostAliases = {
   "sks.pgpkeys.eu" => ["de.pgpkeys.eu"],
   "hkp.openpgpkeys.net" => ["pgp.gwolf.org"],
   "keyserver1.computer42.org" => ["keyserver.computer42.org"],
-  "gozer.rediris.es" => ["pgp.rediris.es"], # pgp is a round-robin for zuul and gozer, but zuul is currently broken
+  "zuul.rediris.es" => ["pgp.rediris.es"], # pgp is a round-robin for zuul and gozer, but gozer is currently broken
   "pgp.surf.nl" => ["pgp.surfnet.nl", "pgp-ng.surf.nl"],
   "sks.pyro.eu.org" => ["keyserver.sincer.us"],
   "openpgp.circl.lu" => ["pgp.circl.lu"],
@@ -82,6 +82,7 @@ HostAliases = {
   "pgp.mit.edu" => ["cryptonomicon.mit.edu"],
   "raxus.rnp.br" => ["keyserver.cais.rnp.br"],
   "sks.srv.dumain.com" => ["key-server.org"],
+  "keyserver.dobrev.eu" => ["keyserver.dobrev.it"],
   "keyserver.ubuntu.com" => ["10.15.42.5", "10.15.42.9"], # hockeypuck-0, hockeypuck-1
   "keyserver1.canonical.com" => ["10.15.42.21"]           # hockeypuck-external-0
 }
