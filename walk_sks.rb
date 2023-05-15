@@ -28,6 +28,7 @@ HistoryMaxEntries = 1500 # this allows us to measure three nines
 RecentlySeenDays = 30 # how long to keep a dead node around before clearing its history
 PeerRecentlySeenDays = 1 # how long to cache peer lists (in case we hit non-peer LB workers)
 SlowFloor = 0.998 # fraction of MeanKeys below which we declare a server slow
+FastCeiling = 1.002 # fraction of MeanKeys above which we declare a server fast
 
 # Always include the following servers in the startfrom list
 StartFrom = [
@@ -438,17 +439,21 @@ def walk_from(server)
     greenFilter = "pass"
   end
 
-  # Compare numkeys to a running floor, and warn if the current value is low
-  if numkeys.to_i > MeanKeys['mean'] * SlowFloor
-    if StartFrom.include? server
-      # Only consider the starting servers when calculating the floor
+  if status == 'ok'
+    if numkeys.to_i < MeanKeys['mean'] * SlowFloor
+      Log.debug("#{server} is up but below the floor; marking as slow")
+      status = 'slow'
+      color = 'darkcyan'
+      statusByte = '-'
+    elsif numkeys.to_i > MeanKeys['mean'] * FastCeiling
+      Log.debug("#{server} is up but above the ceiling; marking as fast")
+      status = 'fast'
+      color = 'darkmagenta'
+      statusByte = '+'
+    elsif StartFrom.include? server
+      # Only consider the starting servers when calculating the mean
       update_mean(numkeys.to_i)
     end
-  elsif status == 'ok'
-    Log.debug("#{server} is up but below the floor; marking as slow")
-    status = 'slow'
-    color = 'darkcyan'
-    statusByte = '-'
   end
 
   if HostCanonicals.has_key?(host)
@@ -539,10 +544,11 @@ Log.info('Starting SKS network probe and analysis')
  ' subgraph clusterKey {',
  '  clusterrank=local;',
  '  pos="0,0!";',
- '  "Last mesh walk performed at %s by %s" [color=none, fontcolor=black, label="%s\n%s", pos="1,9!"];' % [ ISOTimestamp, Ourselves, ISOTimestamp, Ourselves ],
- '  "White text: JSON status (machine-parseable)" [color=green, fontcolor=white, label="JSON status", pos="1,8!"];',
- '  "Yellow text: HTML status (not machine-parseable)" [color=green, fontcolor=yellow, label="HTML status", pos="1,7!"];',
- '  "Cyan background (white or yellow text): Sync lag (number of keys <99% of expected)" [color=darkcyan, fontcolor=white, label="Not syncing", pos="1,6!"];',
+ '  "Last mesh walk performed at %s by %s" [color=none, fontcolor=black, label="%s\n%s", pos="1,10!"];' % [ ISOTimestamp, Ourselves, ISOTimestamp, Ourselves ],
+ '  "White text: JSON status (machine-parseable)" [color=green, fontcolor=white, label="JSON status", pos="1,9!"];',
+ '  "Yellow text: HTML status (not machine-parseable)" [color=green, fontcolor=yellow, label="HTML status", pos="1,8!"];',
+ '  "Cyan background (white or yellow text): Sync lag (number of keys << than expected)" [color=darkcyan, fontcolor=white, label="Slow", pos="1,7!"];',
+ '  "Magenta background (white or yellow text): Runaway (number of keys >> than expected)" [color=darkmagenta, fontcolor=white, label="Fast", pos="1,6!"];',
  '  "Red background: Read timeout (overloaded server)" [color=red, fontcolor=black, label="Read timeout", pos="1,5!"];',
  '  "Orange background: Protocol (SSL, HTTP) error" [color=orange, fontcolor=black, label="Protocol error", pos="1,4!"];',
  '  "Yellow background: Network error (could not connect)" [color=yellow, fontcolor=black, label="Network error", pos="1,3!"];',
