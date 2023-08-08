@@ -84,8 +84,8 @@ HostAliases = {
   "raxus.rnp.br" => ["keyserver.cais.rnp.br"],
   "sks.srv.dumain.com" => ["key-server.org"],
   "keyserver.dobrev.eu" => ["keyserver.dobrev.it"],
-  "keyserver.ubuntu.com" => ["10.15.42.5", "10.15.42.9"], # hockeypuck-0, hockeypuck-1
-  "keyserver1.canonical.com" => ["10.15.42.21"]           # hockeypuck-external-0
+  "keyserver.ubuntu.com" => ["10.131.13.33", "10.131.13.70"],       # hockeypuck-0, hockeypuck-1
+  "keyserver1.canonical.com" => ["10.131.13.180", "162.213.33.38"]  # hockeypuck-external-0, ps45-hockeypuck-external-0
 }
 # Generate the inverse of the host aliases map for convenience
 HostCanonicals = {}
